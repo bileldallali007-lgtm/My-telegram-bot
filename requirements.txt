@@ -1,2 +1,5 @@
 pyTelegramBotAPI
 Flask
+requests
+yfinance
+python-telegram-bot
