@@ -1,17 +1,35 @@
-import yfinance as yf, telebot, os, time
+import yfinance as yf, telebot, os, time, json
 from flask import Flask
 import threading
 from datetime import datetime
 import pytz
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID") # لو عامل قناة حط الاي دي هنا
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-SUBSCRIBERS = set()
 RIYADH = pytz.timezone('Asia/Riyadh')
 
+FILE = "subs.json"
+
+def load_subs():
+    try:
+        with open(FILE, "r") as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def save_subs(subs):
+    try:
+        with open(FILE, "w") as f:
+            json.dump(list(subs), f)
+    except: pass
+
+SUBSCRIBERS = load_subs()
+
 @app.route('/')
-def home(): return "Bilel Auto + Accurate"
+def home(): 
+    return f"Bot Live - Subs: {len(SUBSCRIBERS)}"
 
 def get_rsi(p):
     d=p.diff(); g=(d.where(d>0,0)).rolling(14).mean(); l=(-d.where(d<0,0)).rolling(14).mean(); rs=g/l; return 100-(100/(1+rs))
@@ -33,46 +51,63 @@ def get_signal():
         else: put_pts+=1
         if rsi>55: call_pts+=1
         elif rsi<45: put_pts+=1
-        if call_pts>=4: dec="🟢 CALL"; conf=int(call_pts/(call_pts+put_pts)*100); strike=f"{round(last+10)}"
-        elif put_pts>=4: dec="🔴 PUT"; conf=int(put_pts/(call_pts+put_pts)*100); strike=f"{round(last-10)}"
-        else: dec="🟡 لا تدخل"; conf=50; strike="انتظر"
+        
+        if call_pts>=4: dec="🟢 CALL"; conf=int(call_pts/(call_pts+put_pts)*100)
+        elif put_pts>=4: dec="🔴 PUT"; conf=int(put_pts/(call_pts+put_pts)*100)
+        else: dec="🟡 لا تدخل"; conf=50
+        
         txt="\n".join(reasons)
-        return f"🔔 **تنبيه SPX {last:.2f}**\n\n{txt}\n\n💡 **القرار: {dec} {conf}%**\n🎯 Strike: {strike}\n😨 VIX: {vix:.1f}\n⏰ {datetime.now(RIYADH).strftime('%H:%M')} الرياض\n\n⚠️ 1% فقط - 0DTE خطر"
-    except: return None
+        return f"🔔 SPX {last:.2f}\n\n{txt}\n\n💡 {dec} {conf}%\n😨 VIX: {vix:.1f}\n⏰ {datetime.now(RIYADH).strftime('%H:%M')} الرياض"
+    except Exception as e:
+        return f"خطأ: {e}"
 
 @bot.message_handler(commands=['start','market','spx'])
 def handle(m):
+    global SUBSCRIBERS
     SUBSCRIBERS.add(m.chat.id)
-    bot.send_message(m.chat.id, "✅ اشتركت في الإشعارات الأوتوماتيك\nهيبعتلك 4:25 عصراً + كل 30 دقيقة")
+    save_subs(SUBSCRIBERS)
     s=get_signal()
-    if s: bot.send_message(m.chat.id, s, parse_mode="Markdown")
+    if s:
+        bot.send_message(m.chat.id, s, parse_mode="Markdown")
+        if CHANNEL_ID:
+            try: bot.send_message(CHANNEL_ID, s)
+            except: pass
 
 @bot.message_handler(commands=['stop'])
 def stop(m):
+    global SUBSCRIBERS
     SUBSCRIBERS.discard(m.chat.id)
+    save_subs(SUBSCRIBERS)
     bot.send_message(m.chat.id, "🔕 وقفت الإشعارات")
 
 def auto_loop():
-    sent_times=set()
+    sent=set()
     while True:
         try:
-            now=datetime.now(RIYADH)
-            key=f"{now.day}-{now.hour}-{now.minute}"
-            is_weekday=now.weekday()<5
-            is_market=is_weekday and 16<=now.hour<=23
-            is_alert=now.minute in [25,0,30]
-            if is_market and is_alert and key not in sent_times:
+            now=datetime.now(RIYADH); key=f"{now.day}-{now.hour}-{now.minute}"
+            is_market=now.weekday()<5 and 16<=now.hour<=23
+            # يبعت 4:25 و كل 30 دقيقة
+            if is_market and now.minute in [25,0,30] and key not in sent:
                 s=get_signal()
-                if s and SUBSCRIBERS:
+                print(f"Auto check {now} - subs {len(SUBSCRIBERS)}")
+                if s:
+                    # يبعت للقناة لو موجودة
+                    if CHANNEL_ID:
+                        try: bot.send_message(CHANNEL_ID, "🔔 تنبيه أوتوماتيك\n\n"+s)
+                        except Exception as e: print(e)
+                    # يبعت للمشتركين
                     for cid in list(SUBSCRIBERS):
-                        try: bot.send_message(cid, s, parse_mode="Markdown")
+                        try: bot.send_message(cid, "🔔 تنبيه أوتوماتيك\n\n"+s)
                         except: pass
-                sent_times.add(key)
-                if len(sent_times)>100: sent_times.clear()
+                sent.add(key)
+                if len(sent)>200: sent.clear()
             time.sleep(20)
-        except: time.sleep(60)
+        except Exception as e:
+            print(f"Loop error {e}")
+            time.sleep(60)
 
 def run_flask(): app.run(host='0.0.0.0',port=int(os.environ.get("PORT",5000)))
+
 if __name__=="__main__":
     threading.Thread(target=run_flask).start()
     threading.Thread(target=auto_loop,daemon=True).start()
